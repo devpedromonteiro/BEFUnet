@@ -66,7 +66,7 @@ def plot_result(dice, h, snapshot_path,args):
     df.to_csv(save_mode_path, sep='\t')
 
 
-def trainer(args, model, snapshot_path):
+def trainer(args, model, snapshot_path, resume_path=None):
     date_and_time = datetime.datetime.now()
 
     os.makedirs(os.path.join(snapshot_path, 'test'), exist_ok=True)
@@ -96,9 +96,6 @@ def trainer(args, model, snapshot_path):
 
     trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True,
                              worker_init_fn=worker_init_fn)
-    if args.n_gpu > 1:
-        model = nn.DataParallel(model)
-    model.train()
     
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLoss(num_classes)
@@ -111,11 +108,41 @@ def trainer(args, model, snapshot_path):
     max_iterations = args.max_epochs * len(trainloader) 
     logging.info("{} iterations per epoch. {} max iterations ".format(len(trainloader), max_iterations))
 
-
     best_performance = 0.0
-    iterator = tqdm(range(max_epoch), ncols=70)    
+    start_epoch = 0
     dice_=[]
     hd95_= []
+    
+    # Load checkpoint if resume_path is provided
+    if resume_path and os.path.isfile(resume_path):
+        logging.info(f"Loading checkpoint from {resume_path}")
+        checkpoint = torch.load(resume_path, map_location='cuda')
+        
+        # Load model state (before DataParallel)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        
+        # Load optimizer state
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Load training state
+        start_epoch = checkpoint['epoch'] + 1
+        iter_num = checkpoint['iter_num']
+        best_performance = checkpoint.get('best_performance', 0.0)
+        dice_ = checkpoint.get('dice_', [])
+        hd95_ = checkpoint.get('hd95_', [])
+        
+        logging.info(f"Resumed training from epoch {start_epoch}, iteration {iter_num}")
+        logging.info(f"Best performance so far: {best_performance}")
+        logging.info(f"Metrics history - Dice: {len(dice_)} entries, HD95: {len(hd95_)} entries")
+    elif resume_path:
+        logging.warning(f"Checkpoint file {resume_path} not found. Starting training from scratch.")
+    
+    # Apply DataParallel after loading checkpoint
+    if args.n_gpu > 1:
+        model = nn.DataParallel(model)
+    model.train()
+    
+    iterator = tqdm(range(start_epoch, max_epoch), ncols=70, initial=start_epoch, total=max_epoch)
     
     for epoch_num in iterator:
         for i_batch, sampled_batch in enumerate(trainloader):
@@ -156,11 +183,34 @@ def trainer(args, model, snapshot_path):
                     writer.add_image('train/GroundTruth', labs, iter_num)
             except: pass
         
+        # Save checkpoint (complete state for resuming)
+        checkpoint_filename = f'{args.model_name}_checkpoint_epoch_{epoch_num}.pth'
+        checkpoint_path = os.path.join(snapshot_path, checkpoint_filename)
+        
+        # Prepare model state dict (handle DataParallel)
+        if isinstance(model, nn.DataParallel):
+            model_state_dict = model.module.state_dict()
+        else:
+            model_state_dict = model.state_dict()
+        
+        checkpoint = {
+            'epoch': epoch_num,
+            'iter_num': iter_num,
+            'model_state_dict': model_state_dict,
+            'optimizer_state_dict': optimizer.state_dict(),
+            'best_performance': best_performance,
+            'dice_': dice_,
+            'hd95_': hd95_,
+            'args': args
+        }
+        torch.save(checkpoint, checkpoint_path)
+        logging.info("save checkpoint to {}".format(checkpoint_path))
+        
         # Test
         if (epoch_num + 1) % args.eval_interval == 0:
             filename = f'{args.model_name}_epoch_{epoch_num}.pth'
             save_mode_path = os.path.join(snapshot_path, filename)
-            torch.save(model.state_dict(), save_mode_path)
+            torch.save(model_state_dict, save_mode_path)
             logging.info("save model to {}".format(save_mode_path))
             
             logging.info("*" * 20)
@@ -169,12 +219,20 @@ def trainer(args, model, snapshot_path):
             mean_dice, mean_hd95 = inference(model, testloader, args, test_save_path=test_save_path)
             dice_.append(mean_dice)
             hd95_.append(mean_hd95)
+            
+            # Update best performance
+            if mean_dice > best_performance:
+                best_performance = mean_dice
+                best_checkpoint_path = os.path.join(snapshot_path, f'{args.model_name}_best.pth')
+                torch.save(model_state_dict, best_checkpoint_path)
+                logging.info(f"New best model saved with dice: {best_performance}")
+            
             model.train()
 
         if epoch_num >= max_epoch - 1:
             filename = f'{args.model_name}_epoch_{epoch_num}.pth'
             save_mode_path = os.path.join(snapshot_path, filename)
-            torch.save(model.state_dict(), save_mode_path)
+            torch.save(model_state_dict, save_mode_path)
             logging.info("save model to {}".format(save_mode_path))
             
             if not (epoch_num + 1) % args.eval_interval == 0:

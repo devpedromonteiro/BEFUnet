@@ -4,6 +4,7 @@ import random
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import glob
 
 from models.BEFUnet import BEFUnet
 import configs.BEFUnet_configs as configs
@@ -46,6 +47,8 @@ parser.add_argument('--eval_interval', type=int,
                     default=20, help='evaluation epoch')
 parser.add_argument('--z_spacing', type=int,
                     default=1, help='z_spacing')
+parser.add_argument('--resume', type=str,
+                    default=None, help='path to checkpoint to resume from (if None, will auto-detect latest checkpoint)')
 
 args = parser.parse_args()
 
@@ -76,4 +79,19 @@ if __name__ == "__main__":
 
 
     model = BEFUnet(config=CONFIGS[args.model_name], img_size=args.img_size, n_classes=args.num_classes).cuda()
-    trainer(args, model, args.output_dir)
+    
+    # Handle resume checkpoint
+    resume_path = args.resume
+    if resume_path is None:
+        # Auto-detect latest checkpoint if exists
+        checkpoint_pattern = os.path.join(args.output_dir, f'{args.model_name}_checkpoint_epoch_*.pth')
+        checkpoints = glob.glob(checkpoint_pattern)
+        if checkpoints:
+            # Sort by epoch number (extract from filename)
+            checkpoints.sort(key=lambda x: int(x.split('_epoch_')[1].split('.')[0]))
+            resume_path = checkpoints[-1]  # Get the latest checkpoint
+            print(f"Auto-detected latest checkpoint: {resume_path}")
+        else:
+            print("No checkpoint found. Starting training from scratch.")
+    
+    trainer(args, model, args.output_dir, resume_path=resume_path)
