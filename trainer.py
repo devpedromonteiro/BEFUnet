@@ -135,6 +135,20 @@ def trainer(args, model, snapshot_path, resume_path=None):
         logging.info(f"Resumed training from epoch {start_epoch}, iteration {iter_num}")
         logging.info(f"Best performance so far: {best_performance}")
         logging.info(f"Metrics history - Dice: {len(dice_)} entries, HD95: {len(hd95_)} entries")
+        
+        # Log learning rate and training progress information
+        current_lr = base_lr * (1.0 - iter_num / max_iterations) ** 0.9
+        progress_percent = (iter_num / max_iterations) * 100
+        
+        logging.info("=" * 60)
+        logging.info("TRAINING RESUME INFORMATION:")
+        logging.info(f"  Current epoch: {start_epoch} / {args.max_epochs}")
+        logging.info(f"  Current iteration: {iter_num} / {max_iterations} ({progress_percent:.2f}%)")
+        logging.info(f"  Current learning rate: {current_lr:.6f} (base_lr: {base_lr:.6f})")
+        logging.info(f"  Learning rate decay factor: {(1.0 - iter_num / max_iterations) ** 0.9:.4f}")
+        logging.info(f"  Remaining iterations: {max_iterations - iter_num}")
+        logging.info(f"  Estimated remaining epochs: {(max_iterations - iter_num) / len(trainloader):.1f}")
+        logging.info("=" * 60)
     elif resume_path:
         logging.warning(f"Checkpoint file {resume_path} not found. Starting training from scratch.")
     

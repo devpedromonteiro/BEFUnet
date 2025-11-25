@@ -5,5 +5,5 @@ wget
 tensorboardX
 SimpleITK
 medpy
-numpy>=1.26.0
-torch>=2.0.0
+numpy==2.0.2
+torch==2.9.0+cu126
