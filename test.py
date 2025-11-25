@@ -97,7 +97,14 @@ if __name__ == "__main__":
     args.is_pretrain = True
 
     model = BEFUnet(config=CONFIGS[args.model_name], img_size=args.img_size, n_classes=args.num_classes).cuda()
-    msg = model.load_state_dict(torch.load(args.model_weight))
+    # Use weights_only=False for compatibility with older checkpoints
+    model_weights = torch.load(args.model_weight, map_location='cuda', weights_only=False)
+    # Handle both state_dict and full checkpoint formats
+    if isinstance(model_weights, dict) and 'model_state_dict' in model_weights:
+        model_weights = model_weights['model_state_dict']
+    elif isinstance(model_weights, dict) and 'state_dict' in model_weights:
+        model_weights = model_weights['state_dict']
+    msg = model.load_state_dict(model_weights)
     print("BEFUnet Model: ", msg)
 
     log_folder = './test_log/test_log_'

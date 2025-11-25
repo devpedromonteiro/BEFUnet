@@ -116,7 +116,8 @@ def trainer(args, model, snapshot_path, resume_path=None):
     # Load checkpoint if resume_path is provided
     if resume_path and os.path.isfile(resume_path):
         logging.info(f"Loading checkpoint from {resume_path}")
-        checkpoint = torch.load(resume_path, map_location='cuda')
+        # Use weights_only=False to allow loading argparse.Namespace and other custom objects
+        checkpoint = torch.load(resume_path, map_location='cuda', weights_only=False)
         
         # Load model state (before DataParallel)
         model.load_state_dict(checkpoint['model_state_dict'])
@@ -193,6 +194,9 @@ def trainer(args, model, snapshot_path, resume_path=None):
         else:
             model_state_dict = model.state_dict()
         
+        # Save args as dict instead of Namespace object for better compatibility
+        args_dict = vars(args) if hasattr(args, '__dict__') else args
+        
         checkpoint = {
             'epoch': epoch_num,
             'iter_num': iter_num,
@@ -201,7 +205,7 @@ def trainer(args, model, snapshot_path, resume_path=None):
             'best_performance': best_performance,
             'dice_': dice_,
             'hd95_': hd95_,
-            'args': args
+            'args': args_dict  # Save as dict instead of Namespace
         }
         torch.save(checkpoint, checkpoint_path)
         logging.info("save checkpoint to {}".format(checkpoint_path))
