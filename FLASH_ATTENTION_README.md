@@ -124,3 +124,4 @@ O código verifica automaticamente se FlashAttention-2 está disponível:
 - A implementação atual funciona apenas para atenção bidirecional (não causal)
 
 
+

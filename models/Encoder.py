@@ -22,7 +22,12 @@ try:
     FLASH_ATTENTION_AVAILABLE = True
 except ImportError:
     FLASH_ATTENTION_AVAILABLE = False
-    print("FlashAttention-2 not available. Using standard attention. Install with: pip install flash-attn")
+    # Only print once when module is first imported (not during training)
+    import sys
+    if not hasattr(sys, '_flash_attn_warned'):
+        sys._flash_attn_warned = True
+        print("ℹ️  FlashAttention-2 not available. Using standard attention (automatic fallback).")
+        print("   To enable FlashAttention-2: pip install flash-attn --no-build-isolation")
 
 
 class Attention(nn.Module):
