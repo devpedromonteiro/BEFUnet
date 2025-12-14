@@ -1,6 +1,7 @@
 """
 Author: Omid Nejati Manzari
 Date: Jun  2023
+Modified: Added FlashAttention-2 support for efficient attention computation
 """
 
 import torch
@@ -15,18 +16,29 @@ from .config import config_model, config_model_converted
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+# Try to import FlashAttention-2
+try:
+    from flash_attn import flash_attn_func
+    FLASH_ATTENTION_AVAILABLE = True
+except ImportError:
+    FLASH_ATTENTION_AVAILABLE = False
+    print("FlashAttention-2 not available. Using standard attention. Install with: pip install flash-attn")
+
 
 class Attention(nn.Module):
-    def __init__(self, dim, factor, heads = 8, dim_head = 64, dropout = 0.):
+    def __init__(self, dim, factor, heads = 8, dim_head = 64, dropout = 0., use_flash_attention = True):
         super().__init__()
         inner_dim = dim_head *  heads
         project_out = not (heads == 1 and dim_head == dim)
 
         self.heads = heads
+        self.dim_head = dim_head
         self.scale = dim_head ** -0.5
+        self.use_flash_attention = use_flash_attention and FLASH_ATTENTION_AVAILABLE
 
         self.attend = nn.Softmax(dim = -1)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = dropout  # FlashAttention handles dropout internally
+        self.dropout_layer = nn.Dropout(dropout) if not self.use_flash_attention else nn.Identity()
 
         self.to_qkv = nn.Linear(dim, inner_dim * 3, bias = False)
 
@@ -39,12 +51,30 @@ class Attention(nn.Module):
         qkv = self.to_qkv(x).chunk(3, dim = -1)
         q, k, v = map(lambda t: rearrange(t, 'b n (h d) -> b h n d', h = self.heads), qkv)
 
-        dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+        if self.use_flash_attention:
+            # FlashAttention-2 expects (batch, seq_len, num_heads, head_dim)
+            # Current format: (batch, num_heads, seq_len, head_dim)
+            # Need to transpose to (batch, seq_len, num_heads, head_dim)
+            q = q.transpose(1, 2).contiguous()  # (b, n, h, d)
+            k = k.transpose(1, 2).contiguous()  # (b, n, h, d)
+            v = v.transpose(1, 2).contiguous()  # (b, n, h, d)
+            
+            # FlashAttention-2 forward pass
+            # dropout_p: dropout probability (0.0 means no dropout)
+            # softmax_scale: scaling factor for attention scores
+            # causal: whether to use causal masking (False for bidirectional)
+            out = flash_attn_func(q, k, v, dropout_p=self.dropout if self.training else 0.0, 
+                                 softmax_scale=self.scale, causal=False)
+            
+            # Transpose back to (batch, num_heads, seq_len, head_dim)
+            out = out.transpose(1, 2).contiguous()  # (b, h, n, d)
+        else:
+            # Standard attention computation
+            dots = torch.matmul(q, k.transpose(-1, -2)) * self.scale
+            attn = self.attend(dots)
+            attn = self.dropout_layer(attn)
+            out = torch.matmul(attn, v)
 
-        attn = self.attend(dots)
-        attn = self.dropout(attn)
-
-        out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
         return self.to_out(out)
 
