@@ -587,6 +587,90 @@ class DiceLoss(nn.Module):
         return loss / self.n_classes
 
 
+class FocalTverskyLoss(nn.Module):
+    """
+    Focal Tversky Loss for multi-class segmentation.
+    Particularly effective for minority classes.
+    
+    Based on: https://www.nature.com/articles/s41592-020-01008-z
+    
+    Args:
+        n_classes: Number of classes
+        alpha: Weight for false positives (default: 0.3)
+        beta: Weight for false negatives (default: 0.7) - higher beta focuses on recall
+        gamma: Focal parameter to focus on hard examples (default: 4/3)
+        smooth: Smoothing factor to avoid division by zero (default: 1e-6)
+    """
+    def __init__(self, n_classes, alpha=0.3, beta=0.7, gamma=4/3, smooth=1e-6):
+        super(FocalTverskyLoss, self).__init__()
+        self.n_classes = n_classes
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.smooth = smooth
+
+    def _one_hot_encoder(self, input_tensor):
+        tensor_list = []
+        for i in range(self.n_classes):
+            temp_prob = input_tensor == i
+            tensor_list.append(temp_prob.unsqueeze(1))
+        output_tensor = torch.cat(tensor_list, dim=1)
+        return output_tensor.float()
+
+    def _tversky_index(self, score, target):
+        """
+        Calculate Tversky Index for a single class.
+        TI = TP / (TP + alpha*FP + beta*FN)
+        """
+        target = target.float()
+        score = score.float()
+        
+        # Flatten tensors
+        score_flat = score.view(-1)
+        target_flat = target.view(-1)
+        
+        # Calculate TP, FP, FN
+        TP = (score_flat * target_flat).sum()
+        FP = ((1 - target_flat) * score_flat).sum()
+        FN = (target_flat * (1 - score_flat)).sum()
+        
+        # Tversky Index
+        tversky_index = (TP + self.smooth) / (TP + self.alpha * FP + self.beta * FN + self.smooth)
+        
+        return tversky_index
+
+    def forward(self, inputs, target, weight=None, softmax=False):
+        """
+        Forward pass for Focal Tversky Loss.
+        
+        Args:
+            inputs: Model predictions (B, C, H, W) or logits
+            target: Ground truth labels (B, H, W) with class indices
+            weight: Optional class weights
+            softmax: Whether to apply softmax to inputs
+        
+        Returns:
+            Focal Tversky Loss value
+        """
+        if softmax:
+            inputs = torch.softmax(inputs, dim=1)
+        target = self._one_hot_encoder(target)
+        
+        if weight is None:
+            weight = [1] * self.n_classes
+        
+        assert inputs.size() == target.size(), 'predict {} & target {} shape do not match'.format(inputs.size(), target.size())
+        
+        loss = 0.0
+        for i in range(0, self.n_classes):
+            tversky_index = self._tversky_index(inputs[:, i], target[:, i])
+            # Focal Tversky Loss: (1 - TI)^gamma
+            focal_tversky = torch.pow(1 - tversky_index, self.gamma)
+            loss += focal_tversky * weight[i]
+        
+        return loss / self.n_classes
+
+
 def calculate_metric_percase(pred, gt):
     pred[pred > 0] = 1
     gt[gt > 0] = 1
