@@ -625,9 +625,9 @@ class FocalTverskyLoss(nn.Module):
         target = target.float()
         score = score.float()
         
-        # Flatten tensors
-        score_flat = score.view(-1)
-        target_flat = target.view(-1)
+        # Flatten tensors (using reshape instead of view to handle non-contiguous tensors)
+        score_flat = score.reshape(-1)
+        target_flat = target.reshape(-1)
         
         # Calculate TP, FP, FN
         TP = (score_flat * target_flat).sum()
