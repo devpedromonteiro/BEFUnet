@@ -10,7 +10,7 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import DiceLoss, test_single_volume
+from utils import DiceLoss, BoundaryLoss, test_single_volume
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -99,6 +99,21 @@ def trainer(args, model, snapshot_path, resume_path=None):
     
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLoss(num_classes)
+    boundary_loss = BoundaryLoss(num_classes)
+    
+    # Loss weights (can be configured via args)
+    weight_ce = getattr(args, 'weight_ce', 0.4)
+    weight_dice = getattr(args, 'weight_dice', 0.5)
+    weight_boundary = getattr(args, 'weight_boundary', 0.1)
+    
+    # Normalize weights to sum to 1
+    total_weight = weight_ce + weight_dice + weight_boundary
+    weight_ce /= total_weight
+    weight_dice /= total_weight
+    weight_boundary /= total_weight
+    
+    logging.info(f"Loss weights - CE: {weight_ce:.3f}, Dice: {weight_dice:.3f}, Boundary: {weight_boundary:.3f}")
+    
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
     writer = SummaryWriter(snapshot_path + '/log')
@@ -170,7 +185,11 @@ def trainer(args, model, snapshot_path, resume_path=None):
             outputs = model(image_batch)
             loss_ce = ce_loss(outputs, label_batch[:].long())
             loss_dice = dice_loss(outputs, label_batch, softmax=True)
-            loss = 0.4 * loss_ce + 0.6 * loss_dice
+            loss_boundary = boundary_loss(outputs, label_batch, softmax=True)
+            
+            # Combined loss with configurable weights
+            loss = weight_ce * loss_ce + weight_dice * loss_dice + weight_boundary * loss_boundary
+            
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -184,8 +203,10 @@ def trainer(args, model, snapshot_path, resume_path=None):
             writer.add_scalar('info/total_loss', loss, iter_num)
             writer.add_scalar('info/loss_ce', loss_ce, iter_num)
             writer.add_scalar('info/loss_dice', loss_dice, iter_num)
+            writer.add_scalar('info/loss_boundary', loss_boundary, iter_num)
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f loss_dice: %f' % (iter_num, loss.item(), loss_ce.item(), loss_dice.item()))
+            logging.info('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, loss_boundary: %f' % 
+                        (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_boundary.item()))
 
             try:
                 if iter_num % 10 == 0:
