@@ -618,11 +618,10 @@ class BoundaryLoss(nn.Module):
             mask: Binary mask (numpy array)
             
         Returns:
-            Distance map where each pixel contains the distance to the nearest boundary
+            Normalized distance map where each pixel contains the distance to the nearest boundary
         """
-        # Invert mask: boundary is where mask transitions from 0 to 1 or vice versa
-        # For boundary loss, we compute distance from inside the region to the boundary
         mask_np = mask.astype(np.uint8)
+        H, W = mask_np.shape
         
         # Compute distance transform: distance from each pixel to the nearest boundary
         # For pixels inside the region (value=1), compute distance to boundary
@@ -633,6 +632,15 @@ class BoundaryLoss(nn.Module):
         
         # Combine: positive inside, negative outside
         dist_map = dist_map - dist_map_inv
+        
+        # Normalize by the diagonal of the image to keep values in a reasonable range
+        # This prevents extremely large values that cause numerical instability
+        max_dist = np.sqrt(H * H + W * W)
+        if max_dist > 0:
+            dist_map = dist_map / max_dist
+        
+        # Clip extreme values to prevent overflow
+        dist_map = np.clip(dist_map, -1.0, 1.0)
         
         return dist_map.astype(np.float32)
 
@@ -660,12 +668,11 @@ class BoundaryLoss(nn.Module):
         B, C, H, W = inputs.size()
         device = inputs.device
         
-        total_loss = 0.0
+        # Collect individual losses to properly handle gradients
+        losses = []
         
         # Compute boundary loss for each class
         for c in range(self.n_classes):
-            class_loss = 0.0
-            
             for b in range(B):
                 # Get binary mask for this class
                 gt_mask = target_one_hot[b, c].cpu().numpy()
@@ -683,12 +690,18 @@ class BoundaryLoss(nn.Module):
                 
                 # Boundary loss: multiply predictions by distance map
                 # This penalizes predictions far from the true boundary
-                class_loss += torch.sum(pred_mask * dist_map_tensor)
-            
-            total_loss += class_loss
+                # Use mean instead of sum to keep values normalized
+                class_loss = torch.mean(pred_mask * dist_map_tensor)
+                losses.append(class_loss)
         
-        # Normalize by batch size and number of classes
-        return total_loss / (B * self.n_classes)
+        # Average over all valid samples
+        if len(losses) > 0:
+            total_loss = torch.stack(losses).mean()
+        else:
+            # Return zero loss if no valid samples
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        return total_loss
 
 
 def calculate_metric_percase(pred, gt):
