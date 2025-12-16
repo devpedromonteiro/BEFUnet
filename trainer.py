@@ -10,7 +10,7 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import DiceLoss, test_single_volume
+from utils import DiceLoss, FocalTverskyLoss, test_single_volume
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -97,8 +97,10 @@ def trainer(args, model, snapshot_path, resume_path=None):
     trainloader = DataLoader(db_train, batch_size=batch_size, shuffle=True, num_workers=args.num_workers, pin_memory=True,
                              worker_init_fn=worker_init_fn)
     
+    # Initialize all loss functions for combination
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLoss(num_classes)
+    focal_tversky_loss = FocalTverskyLoss(n_classes=num_classes, alpha=0.3, beta=0.7, gamma=4/3)
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
     writer = SummaryWriter(snapshot_path + '/log')
@@ -168,9 +170,9 @@ def trainer(args, model, snapshot_path, resume_path=None):
             image_batch = image_batch.expand(B, 3, H, W)
 
             outputs = model(image_batch)
-            loss_ce = ce_loss(outputs, label_batch[:].long())
+            loss_ft = focal_tversky_loss(outputs, label_batch[:].long(), softmax=True)
             loss_dice = dice_loss(outputs, label_batch, softmax=True)
-            loss = 0.4 * loss_ce + 0.6 * loss_dice
+            loss = 0.4 * loss_ft + 0.6 * loss_dice
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -182,10 +184,10 @@ def trainer(args, model, snapshot_path, resume_path=None):
             iter_num = iter_num + 1
             writer.add_scalar('info/lr', lr_, iter_num)
             writer.add_scalar('info/total_loss', loss, iter_num)
-            writer.add_scalar('info/loss_ce', loss_ce, iter_num)
+            writer.add_scalar('info/loss_focal_tversky', loss_ft, iter_num)
             writer.add_scalar('info/loss_dice', loss_dice, iter_num)
 
-            logging.info('iteration %d : loss : %f, loss_ce: %f loss_dice: %f' % (iter_num, loss.item(), loss_ce.item(), loss_dice.item()))
+            logging.info('iteration %d : loss : %f, loss_focal_tversky: %f loss_dice: %f' % (iter_num, loss.item(), loss_ft.item(), loss_dice.item()))
 
             try:
                 if iter_num % 10 == 0:
