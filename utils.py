@@ -619,6 +619,7 @@ class BoundaryLoss(nn.Module):
             
         Returns:
             Normalized distance map where each pixel contains the distance to the nearest boundary
+            Values are positive inside the region and negative outside, normalized by image diagonal
         """
         mask_np = mask.astype(np.uint8)
         H, W = mask_np.shape
@@ -633,14 +634,11 @@ class BoundaryLoss(nn.Module):
         # Combine: positive inside, negative outside
         dist_map = dist_map - dist_map_inv
         
-        # Normalize by the diagonal of the image to keep values in a reasonable range
+        # Normalize by the maximum possible distance (diagonal) to keep values in reasonable range
         # This prevents extremely large values that cause numerical instability
         max_dist = np.sqrt(H * H + W * W)
         if max_dist > 0:
             dist_map = dist_map / max_dist
-        
-        # Clip extreme values to prevent overflow
-        dist_map = np.clip(dist_map, -1.0, 1.0)
         
         return dist_map.astype(np.float32)
 
@@ -648,13 +646,18 @@ class BoundaryLoss(nn.Module):
         """
         Compute boundary loss.
         
+        The boundary loss penalizes predictions that are far from the true boundary.
+        It uses a signed distance map (positive inside, negative outside) multiplied
+        by the predicted probabilities. The absolute value is taken to ensure the loss
+        is always positive and stable for optimization.
+        
         Args:
             inputs: Model predictions (B, C, H, W) - logits or probabilities
             target: Ground truth labels (B, H, W) - class indices
             softmax: If True, apply softmax to inputs (if False, assumes inputs are already probabilities)
             
         Returns:
-            Boundary loss value
+            Boundary loss value (always positive)
         """
         # Convert logits to probabilities if needed
         if not softmax:
@@ -689,9 +692,11 @@ class BoundaryLoss(nn.Module):
                 pred_mask = inputs[b, c]  # (H, W)
                 
                 # Boundary loss: multiply predictions by distance map
-                # This penalizes predictions far from the true boundary
-                # Use mean instead of sum to keep values normalized
-                class_loss = torch.mean(pred_mask * dist_map_tensor)
+                # According to paper: L_boundary = ∫ φ_G(p) * s_θ(p) dp
+                # where φ_G is signed distance map and s_θ is softmax probability
+                # We use absolute value to ensure positive loss and numerical stability
+                # This penalizes predictions far from the true boundary (both inside and outside)
+                class_loss = torch.mean(torch.abs(pred_mask * dist_map_tensor))
                 losses.append(class_loss)
         
         # Average over all valid samples

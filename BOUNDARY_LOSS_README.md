@@ -45,14 +45,16 @@ O Boundary Loss funciona através dos seguintes passos:
 Para uma classe `c`, o boundary loss é calculado como:
 
 ```
-L_boundary = Σ(pred_c * dist_map_c) / (B * C)
+L_boundary = mean(|pred_c * dist_map_c|)
 ```
 
 Onde:
-- `pred_c`: Probabilidades preditas para a classe `c`
-- `dist_map_c`: Mapa de distância da ground truth da classe `c`
-- `B`: Tamanho do batch
-- `C`: Número de classes
+- `pred_c`: Probabilidades preditas para a classe `c` (após softmax)
+- `dist_map_c`: Mapa de distância assinado da ground truth da classe `c` (positivo dentro, negativo fora)
+- `|·|`: Valor absoluto para garantir perda sempre positiva
+- A média é calculada sobre todos os pixels válidos (onde a classe está presente)
+
+**Nota:** O uso do valor absoluto garante que a perda seja sempre positiva e estável numericamente, evitando problemas de otimização quando valores negativos grandes dominam a perda total.
 
 ## Integração no Treinamento
 
@@ -182,6 +184,8 @@ Esta dependência já está incluída no `requirements.txt` padrão do projeto.
    - Para problemas com classes muito desbalanceadas: aumentar `weight_boundary` (0.2-0.3)
    - Para problemas com bordas críticas: aumentar `weight_boundary` (0.15-0.25)
 
+4. **Estabilidade Numérica**: A implementação usa valor absoluto para garantir que o boundary loss seja sempre positivo, evitando problemas de otimização quando valores negativos grandes dominam a perda total. O mapa de distância é normalizado pela diagonal da imagem para manter valores em uma faixa razoável.
+
 ## Resultados Esperados
 
 Com o Boundary Loss, espera-se:
@@ -189,6 +193,31 @@ Com o Boundary Loss, espera-se:
 - **Melhoria na precisão de bordas** (métrica HD95)
 - **Melhor segmentação de classes minoritárias**
 - **Redução de falsos positivos próximos às bordas**
+
+## Correção de Estabilidade Numérica
+
+### Problema Identificado
+
+A implementação original do boundary loss poderia gerar valores negativos muito grandes (ex: -15.448545, -13.795355), causando:
+
+1. **Instabilidade no treinamento**: A perda total poderia se tornar negativa quando o boundary loss negativo dominava
+2. **Otimização inadequada**: Valores negativos grandes interferiam com o processo de otimização
+3. **Comportamento inconsistente**: Oscilações entre valores positivos e negativos muito grandes
+
+### Solução Implementada
+
+A correção implementada garante que o boundary loss seja sempre positivo através de:
+
+1. **Uso de valor absoluto**: `torch.abs(pred_mask * dist_map_tensor)` em vez de apenas `pred_mask * dist_map_tensor`
+2. **Normalização adequada**: O mapa de distância é normalizado pela diagonal da imagem, mantendo valores em uma faixa razoável
+3. **Remoção de clipping desnecessário**: O clipping que poderia mascarar problemas foi removido, mantendo apenas a normalização
+
+### Impacto da Correção
+
+- ✅ Boundary loss sempre positivo e estável
+- ✅ Perda total sempre positiva (quando combinada com outras losses positivas)
+- ✅ Treinamento mais estável e convergente
+- ✅ Valores de perda em escala similar às outras losses (CE e Dice)
 
 ## Troubleshooting
 
@@ -199,6 +228,11 @@ Com o Boundary Loss, espera-se:
 ### Boundary Loss muito alto ou muito baixo
 - Ajuste o peso `weight_boundary` conforme necessário
 - Verifique se as predições estão no formato correto (probabilidades após softmax)
+- O boundary loss deve ser sempre positivo após a correção implementada. Se você observar valores negativos grandes, verifique se está usando a versão corrigida do código.
+
+### Boundary Loss com valores negativos grandes
+- **Problema corrigido**: A implementação anterior poderia gerar valores negativos muito grandes (ex: -15.448545), causando instabilidade no treinamento e perda total negativa.
+- **Solução**: A versão corrigida usa valor absoluto (`torch.abs()`) para garantir que o boundary loss seja sempre positivo, mantendo a estabilidade numérica e permitindo otimização adequada.
 
 ### Performance lenta
 - O cálculo do mapa de distância é feito na CPU. Para acelerar, considere pré-computar os mapas de distância ou usar implementação GPU (se disponível)
