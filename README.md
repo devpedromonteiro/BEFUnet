@@ -8,7 +8,7 @@
 
 
 ## Train & Test --- Synapse Dataset
-Please go to ["Colab_BEFUnet.ipynb"](https://github.com/devpedromonteiro/BEFUnet/blob/focal-tversky-loss/Colab_BEFUnet.ipynb) for complete detail on dataset preparation and Train/Test procedure or follow the instructions below. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/devpedromonteiro/BEFUnet/blob/focal-tversky-loss/Colab_BEFUnet.ipynb)
+Please go to ["Colab_BEFUnet.ipynb"](https://github.com/devpedromonteiro/BEFUnet/blob/combination/Colab_BEFUnet.ipynb) for complete detail on dataset preparation and Train/Test procedure or follow the instructions below. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/devpedromonteiro/BEFUnet/blob/combination/Colab_BEFUnet.ipynb)
 
 ## 
 

@@ -49,6 +49,14 @@ parser.add_argument('--z_spacing', type=int,
                     default=1, help='z_spacing')
 parser.add_argument('--resume', type=str,
                     default=None, help='path to checkpoint to resume from (if None, will auto-detect latest checkpoint)')
+parser.add_argument('--weight_ce', type=float,
+                    default=0.2, help='weight for Cross Entropy loss')
+parser.add_argument('--weight_dice', type=float,
+                    default=0.3, help='weight for Dice loss')
+parser.add_argument('--weight_focal_tversky', type=float,
+                    default=0.3, help='weight for Focal Tversky loss')
+parser.add_argument('--weight_boundary', type=float,
+                    default=0.2, help='weight for Boundary loss')
 
 args = parser.parse_args()
 

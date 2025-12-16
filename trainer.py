@@ -10,7 +10,7 @@ from tensorboardX import SummaryWriter
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from utils import DiceLoss, FocalTverskyLoss, test_single_volume
+from utils import DiceLoss, FocalTverskyLoss, BoundaryLoss, test_single_volume
 from torchvision import transforms
 import matplotlib.pyplot as plt
 import pandas as pd
@@ -101,6 +101,23 @@ def trainer(args, model, snapshot_path, resume_path=None):
     ce_loss = CrossEntropyLoss()
     dice_loss = DiceLoss(num_classes)
     focal_tversky_loss = FocalTverskyLoss(n_classes=num_classes, alpha=0.3, beta=0.7, gamma=4/3)
+    boundary_loss = BoundaryLoss(num_classes)
+    
+    # Loss weights (can be configured via args)
+    weight_ce = getattr(args, 'weight_ce', 0.2)
+    weight_dice = getattr(args, 'weight_dice', 0.3)
+    weight_focal_tversky = getattr(args, 'weight_focal_tversky', 0.3)
+    weight_boundary = getattr(args, 'weight_boundary', 0.2)
+    
+    # Normalize weights to sum to 1
+    total_weight = weight_ce + weight_dice + weight_focal_tversky + weight_boundary
+    weight_ce /= total_weight
+    weight_dice /= total_weight
+    weight_focal_tversky /= total_weight
+    weight_boundary /= total_weight
+    
+    logging.info(f"Loss weights - CE: {weight_ce:.3f}, Dice: {weight_dice:.3f}, FocalTversky: {weight_focal_tversky:.3f}, Boundary: {weight_boundary:.3f}")
+    
     optimizer = optim.SGD(model.parameters(), lr=base_lr, momentum=0.9, weight_decay=0.0001)
     
     writer = SummaryWriter(snapshot_path + '/log')
@@ -170,9 +187,16 @@ def trainer(args, model, snapshot_path, resume_path=None):
             image_batch = image_batch.expand(B, 3, H, W)
 
             outputs = model(image_batch)
-            loss_ft = focal_tversky_loss(outputs, label_batch[:].long(), softmax=True)
+            loss_ce = ce_loss(outputs, label_batch[:].long())
             loss_dice = dice_loss(outputs, label_batch, softmax=True)
-            loss = 0.4 * loss_ft + 0.6 * loss_dice
+            loss_focal_tversky = focal_tversky_loss(outputs, label_batch[:].long(), softmax=True)
+            loss_boundary = boundary_loss(outputs, label_batch, softmax=True)
+            
+            # Combined loss with configurable weights
+            loss = (weight_ce * loss_ce + 
+                    weight_dice * loss_dice + 
+                    weight_focal_tversky * loss_focal_tversky + 
+                    weight_boundary * loss_boundary)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -184,10 +208,13 @@ def trainer(args, model, snapshot_path, resume_path=None):
             iter_num = iter_num + 1
             writer.add_scalar('info/lr', lr_, iter_num)
             writer.add_scalar('info/total_loss', loss, iter_num)
-            writer.add_scalar('info/loss_focal_tversky', loss_ft, iter_num)
+            writer.add_scalar('info/loss_ce', loss_ce, iter_num)
             writer.add_scalar('info/loss_dice', loss_dice, iter_num)
+            writer.add_scalar('info/loss_focal_tversky', loss_focal_tversky, iter_num)
+            writer.add_scalar('info/loss_boundary', loss_boundary, iter_num)
 
-            logging.info('iteration %d : loss : %f, loss_focal_tversky: %f loss_dice: %f' % (iter_num, loss.item(), loss_ft.item(), loss_dice.item()))
+            logging.info('iteration %d : loss : %f, loss_ce: %f, loss_dice: %f, loss_focal_tversky: %f, loss_boundary: %f' % 
+                        (iter_num, loss.item(), loss_ce.item(), loss_dice.item(), loss_focal_tversky.item(), loss_boundary.item()))
 
             try:
                 if iter_num % 10 == 0:

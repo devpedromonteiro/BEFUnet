@@ -543,7 +543,7 @@ class MultiScaleBlock(nn.Module):
 import numpy as np
 import torch
 from medpy import metric
-from scipy.ndimage import zoom
+from scipy.ndimage import zoom, distance_transform_edt
 import torch.nn as nn
 import SimpleITK as sitk
 
@@ -669,6 +669,128 @@ class FocalTverskyLoss(nn.Module):
             loss += focal_tversky * weight[i]
         
         return loss / self.n_classes
+
+
+class BoundaryLoss(nn.Module):
+    """
+    Boundary Loss implementation for highly unbalanced segmentation.
+    
+    This loss function focuses on the boundaries between regions, which is particularly
+    useful for medical image segmentation where boundary accuracy is critical.
+    
+    Reference: Kervadec et al. "Boundary loss for highly unbalanced segmentation"
+    https://www.nature.com/articles/s41592-020-01008-z
+    """
+    def __init__(self, n_classes):
+        super(BoundaryLoss, self).__init__()
+        self.n_classes = n_classes
+
+    def _one_hot_encoder(self, input_tensor):
+        """Convert class indices to one-hot encoding."""
+        tensor_list = []
+        for i in range(self.n_classes):
+            temp_prob = input_tensor == i
+            tensor_list.append(temp_prob.unsqueeze(1))
+        output_tensor = torch.cat(tensor_list, dim=1)
+        return output_tensor.float()
+
+    def _compute_distance_map(self, mask):
+        """
+        Compute the distance transform for a binary mask.
+        
+        Args:
+            mask: Binary mask (numpy array)
+            
+        Returns:
+            Normalized distance map where each pixel contains the distance to the nearest boundary
+            Values are positive inside the region and negative outside, normalized by image diagonal
+        """
+        mask_np = mask.astype(np.uint8)
+        H, W = mask_np.shape
+        
+        # Compute distance transform: distance from each pixel to the nearest boundary
+        # For pixels inside the region (value=1), compute distance to boundary
+        dist_map = distance_transform_edt(mask_np)
+        
+        # For pixels outside the region (value=0), compute distance to boundary (negative)
+        dist_map_inv = distance_transform_edt(1 - mask_np)
+        
+        # Combine: positive inside, negative outside
+        dist_map = dist_map - dist_map_inv
+        
+        # Normalize by the maximum possible distance (diagonal) to keep values in reasonable range
+        # This prevents extremely large values that cause numerical instability
+        max_dist = np.sqrt(H * H + W * W)
+        if max_dist > 0:
+            dist_map = dist_map / max_dist
+        
+        return dist_map.astype(np.float32)
+
+    def forward(self, inputs, target, softmax=False):
+        """
+        Compute boundary loss.
+        
+        The boundary loss penalizes predictions that are far from the true boundary.
+        It uses a signed distance map (positive inside, negative outside) multiplied
+        by the predicted probabilities. The absolute value is taken to ensure the loss
+        is always positive and stable for optimization.
+        
+        Args:
+            inputs: Model predictions (B, C, H, W) - logits or probabilities
+            target: Ground truth labels (B, H, W) - class indices
+            softmax: If True, apply softmax to inputs (if False, assumes inputs are already probabilities)
+            
+        Returns:
+            Boundary loss value (always positive)
+        """
+        # Convert logits to probabilities if needed
+        if not softmax:
+            inputs = torch.softmax(inputs, dim=1)
+        
+        target_one_hot = self._one_hot_encoder(target)  # (B, C, H, W)
+        
+        assert inputs.size() == target_one_hot.size(), \
+            f'predict {inputs.size()} & target {target_one_hot.size()} shape do not match'
+        
+        B, C, H, W = inputs.size()
+        device = inputs.device
+        
+        # Collect individual losses to properly handle gradients
+        losses = []
+        
+        # Compute boundary loss for each class
+        for c in range(self.n_classes):
+            for b in range(B):
+                # Get binary mask for this class
+                gt_mask = target_one_hot[b, c].cpu().numpy()
+                
+                # Skip if class not present in this sample
+                if gt_mask.sum() == 0:
+                    continue
+                
+                # Compute distance map for ground truth boundary
+                dist_map = self._compute_distance_map(gt_mask)
+                dist_map_tensor = torch.from_numpy(dist_map).to(device)
+                
+                # Get predictions for this class
+                pred_mask = inputs[b, c]  # (H, W)
+                
+                # Boundary loss: multiply predictions by distance map
+                # According to paper: L_boundary = ∫ φ_G(p) * s_θ(p) dp
+                # where φ_G is signed distance map and s_θ is softmax probability
+                # We use absolute value to ensure positive loss and numerical stability
+                # This penalizes predictions far from the true boundary (both inside and outside)
+                class_loss = torch.mean(torch.abs(pred_mask * dist_map_tensor))
+                losses.append(class_loss)
+        
+        # Average over all valid samples
+        if len(losses) > 0:
+            total_loss = torch.stack(losses).mean()
+        else:
+            # Return zero loss if no valid samples
+            total_loss = torch.tensor(0.0, device=device, requires_grad=True)
+        
+        return total_loss
 
 
 def calculate_metric_percase(pred, gt):
