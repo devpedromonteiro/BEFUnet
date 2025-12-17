@@ -152,10 +152,16 @@ class LinformerWindowAttention(nn.Module):
 
         if mask is not None:
             nW = mask.shape[0]
-            # For Linformer, mask needs to be adapted - use mean mask value per head
-            mask_avg = mask.mean(dim=-1, keepdim=True)  # nW, Wh*Ww, 1
-            attn = attn.view(B_ // nW, nW, self.num_heads, N, self.linformer_k) + mask_avg.unsqueeze(1).unsqueeze(0).unsqueeze(-1)
-            attn = attn.view(-1, self.num_heads, N, self.linformer_k)
+            # For Linformer, mask needs to be adapted since attention is N×k instead of N×N
+            # mask shape: (nW, N, N) -> we need to adapt it for (nW, N, k)
+            # Strategy: average mask across keys dimension to get (nW, N), then expand
+            mask_avg = mask.mean(dim=-1)  # nW, N - average mask values for each query position
+            # Reshape attn to separate windows: (B_ // nW, nW, num_heads, N, linformer_k)
+            attn_reshaped = attn.view(B_ // nW, nW, self.num_heads, N, self.linformer_k)
+            # Expand mask_avg: (nW, N) -> (1, nW, 1, N, 1) to broadcast to all heads and k dimension
+            mask_expanded = mask_avg.unsqueeze(0).unsqueeze(2).unsqueeze(-1)  # 1, nW, 1, N, 1
+            attn_reshaped = attn_reshaped + mask_expanded
+            attn = attn_reshaped.view(-1, self.num_heads, N, self.linformer_k)
             attn = self.softmax(attn)
         else:
             attn = self.softmax(attn)
