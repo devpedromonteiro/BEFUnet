@@ -215,6 +215,8 @@ Conforme mencionado nos comentários do código, sugere-se realizar ablações c
 1. **Janelas Pequenas**: Para window_size muito pequeno (ex: 4×4), o Linformer pode não oferecer vantagem significativa
 2. **Inicialização**: As matrizes E_k e E_v são inicializadas aleatoriamente; pode ser necessário ajustar a inicialização
 3. **Relative Position Bias**: A implementação atual simplifica o relative position bias para compatibilidade com Linformer
+4. **Pesos Pré-treinados**: Quando `use_linformer=True`, os pesos de atenção do checkpoint pré-treinado do Swin Transformer não podem ser carregados diretamente, pois a estrutura da atenção muda. O modelo usa `strict=False` para carregar apenas pesos compatíveis (norm, MLP, etc.) e inicializa aleatoriamente os parâmetros de atenção e as matrizes de projeção do Linformer. Isso significa que o treinamento começará do zero para os módulos de atenção quando Linformer estiver habilitado.
+5. **Máscara de Atenção**: A aplicação de máscaras (usadas em shifted window attention) foi adaptada para funcionar com a estrutura linear do Linformer, usando média da máscara ao longo da dimensão de keys.
 
 ## Referências
 
@@ -241,4 +243,6 @@ Esta implementação foi desenvolvida para:
 - Quando `use_linformer=False`, o comportamento é idêntico à versão original
 - As matrizes de projeção E_k e E_v são aprendíveis e otimizadas durante o treinamento
 - A implementação suporta tanto atenção dentro de janelas quanto cross-attention entre escalas
+- **Carregamento de Pesos**: Em `models/Encoder.py`, quando `use_linformer=True`, o código usa `load_state_dict(checkpoint, strict=False)` para permitir que pesos incompatíveis sejam ignorados. Os pesos de atenção (qkv, proj) e as matrizes de projeção do Linformer (E_k, E_v) são inicializados aleatoriamente.
+- **Aplicação de Máscaras**: A máscara de atenção (usada em shifted window attention) é adaptada para Linformer calculando a média ao longo da dimensão de keys, resultando em uma máscara de shape `(nW, N)` que é expandida para fazer broadcast com a atenção de shape `(B_ // nW, nW, num_heads, N, linformer_k)`.
 

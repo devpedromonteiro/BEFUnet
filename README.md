@@ -103,6 +103,22 @@ config.linformer_max_seq_len = 512  # Para CrossAttention
 
 O modelo automaticamente usará atenção linear (Linformer) em vez da atenção padrão quando `use_linformer=True`.
 
+**Nota importante sobre pesos pré-treinados:**
+- Quando `use_linformer=True`, os pesos de atenção (qkv, proj) não podem ser carregados do checkpoint pré-treinado do Swin Transformer, pois a arquitetura é diferente
+- O modelo carrega automaticamente com `strict=False`, mantendo os pesos compatíveis (normalização, MLP, etc.) e inicializando aleatoriamente os pesos de atenção e as matrizes de projeção do Linformer (E_k, E_v)
+- Isso significa que quando usar Linformer pela primeira vez, o modelo começará do zero para os parâmetros de atenção, mas manterá os pesos pré-treinados das outras partes da arquitetura
+
+### Troubleshooting
+
+**Problema**: Erro ao carregar pesos pré-treinados quando `use_linformer=True`
+- **Solução**: Isso é esperado e já está tratado automaticamente. O modelo usa `strict=False` para carregar apenas pesos compatíveis. Os pesos de atenção serão inicializados aleatoriamente.
+
+**Problema**: Erro de dimensões ao aplicar máscaras com Linformer
+- **Solução**: Já corrigido na implementação. A máscara é adaptada automaticamente para a estrutura linear do Linformer.
+
+**Problema**: Performance inicial pior com Linformer habilitado
+- **Explicação**: Isso é esperado, pois os pesos de atenção começam do zero. O modelo precisa ser treinado do início ou fazer fine-tuning. Os pesos pré-treinados das outras partes (normalização, MLP) ainda são carregados.
+
 ### Referências
 
 - [Linformer: Self-Attention with Linear Complexity](https://arxiv.org/abs/2006.04768)
