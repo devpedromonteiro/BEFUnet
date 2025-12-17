@@ -8,7 +8,7 @@
 
 
 ## Train & Test --- Synapse Dataset
-Please go to ["Colab_BEFUnet.ipynb"](https://github.com/devpedromonteiro/BEFUnet/blob/test/Colab_BEFUnet.ipynb) for complete detail on dataset preparation and Train/Test procedure or follow the instructions below. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/devpedromonteiro/BEFUnet/blob/test/Colab_BEFUnet.ipynb)
+Please go to ["Colab_BEFUnet.ipynb"](https://github.com/devpedromonteiro/BEFUnet/blob/linformer/Colab_BEFUnet.ipynb) for complete detail on dataset preparation and Train/Test procedure or follow the instructions below. [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/devpedromonteiro/BEFUnet/blob/linformer/Colab_BEFUnet.ipynb)
 
 ## 
 
@@ -34,6 +34,79 @@ This code has been implemented in python language using Pytorch library and test
     python test.py --test_path ./data/Synapse/test_vol_h5 --model_name BEFUnet --is_savenii --model_weight 
     ```
 
+
+## Linformer Attention Implementation
+
+### O que foi implementado?
+
+Foi adicionada uma implementação completa do **Linformer** como alternativa eficiente aos mecanismos de atenção padrão do BEFUnet. O Linformer é uma variante de atenção linear que reduz significativamente a complexidade computacional de O(N²) para O(N×k), onde k << N é a dimensão de projeção.
+
+#### Componentes Implementados:
+
+1. **`LinformerWindowAttention`** (`utils.py`):
+   - Versão Linformer do `WindowAttention` usado nos blocos Swin Transformer
+   - Projeta keys e values para uma dimensão menor (k) antes do cálculo de atenção
+   - Mantém compatibilidade com relative position bias
+   - Reduz uso de memória e acelera o processamento em janelas de atenção
+
+2. **`LinformerCrossAttention`** (`utils.py`):
+   - Versão Linformer do `CrossAttention` usado no módulo DLF (Dual-Level Fusion)
+   - Suporta sequências de comprimento variável
+   - Usa matrizes de projeção parametrizadas para diferentes comprimentos de sequência
+
+3. **Integração nos Blocos**:
+   - `SwinTransformerBlock`: Suporta escolha entre atenção padrão e Linformer
+   - `CrossAttentionBlock`: Suporta escolha entre atenção padrão e Linformer
+   - `BasicLayer` e `MultiScaleBlock`: Propagam parâmetros do Linformer através da arquitetura
+
+4. **Configuração** (`configs/BEFUnet_configs.py`):
+   - `use_linformer`: Flag para habilitar/desabilitar Linformer (padrão: False)
+   - `linformer_k`: Dimensão de projeção k (padrão: 64)
+   - `linformer_max_seq_len`: Comprimento máximo de sequência para CrossAttention (padrão: 512)
+
+### Por que foi implementado?
+
+A implementação do Linformer foi realizada com base nas seguintes motivações:
+
+1. **Eficiência Computacional**: 
+   - O mecanismo de atenção padrão tem complexidade quadrática O(N²) em relação ao comprimento da sequência
+   - Para imagens médicas de alta resolução, isso pode resultar em uso excessivo de memória e tempo de treinamento
+   - O Linformer reduz isso para O(N×k), onde k é tipicamente muito menor que N (ex: k=64 vs N=3136)
+
+2. **Estudos de Ablação**:
+   - Conforme sugerido em revisões, é importante avaliar variantes leves de atenção
+   - Permite comparar o desempenho entre atenção padrão e atenção linear
+   - Facilita experimentos para encontrar o melhor trade-off entre precisão e eficiência
+
+3. **Escalabilidade**:
+   - Permite treinar modelos com imagens maiores ou batches maiores
+   - Reduz o uso de GPU/TPU, tornando o modelo mais acessível
+   - Facilita a aplicação em ambientes com recursos limitados
+
+4. **Alternativa ao Flash Attention**:
+   - Flash Attention-2 foi tentado mas não funcionou neste contexto
+   - Linformer oferece uma alternativa eficiente e funcional
+   - Implementação mais simples e compatível com a arquitetura existente
+
+### Como usar?
+
+Para habilitar o Linformer, configure no arquivo de configuração:
+
+```python
+from configs.BEFUnet_configs import get_BEFUnet_configs
+
+config = get_BEFUnet_configs()
+config.use_linformer = True      # Habilita Linformer
+config.linformer_k = 64          # Dimensão de projeção (ajuste conforme necessário)
+config.linformer_max_seq_len = 512  # Para CrossAttention
+```
+
+O modelo automaticamente usará atenção linear (Linformer) em vez da atenção padrão quando `use_linformer=True`.
+
+### Referências
+
+- [Linformer: Self-Attention with Linear Complexity](https://arxiv.org/abs/2006.04768)
+- [BEFUnet Paper](https://arxiv.org/abs/2402.08793)
 
 ## Acknowledgement
 We borrowed the code from [Swin Transformer](https://github.com/microsoft/Swin-Transformer) and [PiDinet](https://github.com/hellozhuo/pidinet). Thanks for their wonderful works.
