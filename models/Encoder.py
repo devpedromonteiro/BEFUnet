@@ -182,7 +182,16 @@ class PyramidFeatures(nn.Module):
         for key in list(checkpoint.keys()):
             if key in unexpected :
                 del checkpoint[key]
-        self.swin_transformer.load_state_dict(checkpoint)
+        
+        # When using Linformer, use strict=False because attention structure differs
+        # LinformerWindowAttention has different parameters (E_k, E_v) than WindowAttention
+        if getattr(config, 'use_linformer', False):
+            self.swin_transformer.load_state_dict(checkpoint, strict=False)
+            print("Warning: Linformer enabled - loading pretrained weights with strict=False. "
+                  "Attention weights (qkv, proj) and Linformer projection matrices (E_k, E_v) "
+                  "will be randomly initialized.")
+        else:
+            self.swin_transformer.load_state_dict(checkpoint)
 
 
     def forward(self, x):
