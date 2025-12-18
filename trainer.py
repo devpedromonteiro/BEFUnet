@@ -230,6 +230,12 @@ def trainer(args, model, snapshot_path, resume_path=None):
         
         # Test
         if (epoch_num + 1) % args.eval_interval == 0:
+            # Prepare model state dict (handle DataParallel) - needed for saving model
+            if isinstance(model, nn.DataParallel):
+                model_state_dict = model.module.state_dict()
+            else:
+                model_state_dict = model.state_dict()
+            
             filename = f'{args.model_name}_epoch_{epoch_num}.pth'
             save_mode_path = os.path.join(snapshot_path, filename)
             torch.save(model_state_dict, save_mode_path)
@@ -252,6 +258,12 @@ def trainer(args, model, snapshot_path, resume_path=None):
             model.train()
 
         if epoch_num >= max_epoch - 1:
+            # Prepare model state dict (handle DataParallel) - needed for saving model
+            if isinstance(model, nn.DataParallel):
+                model_state_dict = model.module.state_dict()
+            else:
+                model_state_dict = model.state_dict()
+            
             filename = f'{args.model_name}_epoch_{epoch_num}.pth'
             save_mode_path = os.path.join(snapshot_path, filename)
             torch.save(model_state_dict, save_mode_path)
