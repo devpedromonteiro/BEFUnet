@@ -227,6 +227,12 @@ def trainer(args, model, snapshot_path, resume_path=None):
                     writer.add_image('train/GroundTruth', labs, iter_num)
             except: pass
         
+        # Prepare model state dict (handle DataParallel) - needed for saving models
+        if isinstance(model, nn.DataParallel):
+            model_state_dict = model.module.state_dict()
+        else:
+            model_state_dict = model.state_dict()
+        
         # Save checkpoint (complete state for resuming) - apenas a cada 15 épocas
         checkpoint_interval = 15
         save_checkpoint = (epoch_num % checkpoint_interval == 0) or (epoch_num >= max_epoch - 1)
@@ -234,12 +240,6 @@ def trainer(args, model, snapshot_path, resume_path=None):
         if save_checkpoint:
             checkpoint_filename = f'{args.model_name}_checkpoint_epoch_{epoch_num}.pth'
             checkpoint_path = os.path.join(snapshot_path, checkpoint_filename)
-            
-            # Prepare model state dict (handle DataParallel)
-            if isinstance(model, nn.DataParallel):
-                model_state_dict = model.module.state_dict()
-            else:
-                model_state_dict = model.state_dict()
             
             # Save args as dict instead of Namespace object for better compatibility
             args_dict = vars(args) if hasattr(args, '__dict__') else args
