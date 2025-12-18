@@ -55,7 +55,8 @@ class SwinTransformer(nn.Module):
                  depths=[2, 2, 6, 2], num_heads=[3, 6, 12, 24],
                  window_size=7, mlp_ratio=4., qkv_bias=True, qk_scale=None,
                  drop_rate=0., attn_drop_rate=0., drop_path_rate=0.1,
-                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True, **kwargs):
+                 norm_layer=nn.LayerNorm, ape=False, patch_norm=True,
+                 use_linformer=False, linformer_k=64, **kwargs):
         
         super().__init__()
         
@@ -93,7 +94,8 @@ class SwinTransformer(nn.Module):
                                drop=drop_rate, attn_drop=attn_drop_rate,
                                drop_path=dpr[sum(depths[:i_layer]):sum(depths[:i_layer + 1])],
                                norm_layer=norm_layer,
-                               downsample=None)
+                               downsample=None,
+                               use_linformer=use_linformer, linformer_k=linformer_k)
             self.layers.append(layer)
 
         self.apply(self._init_weights)
@@ -121,7 +123,10 @@ class PyramidFeatures(nn.Module):
         super().__init__()
         
         model_path = config.swin_pretrained_path
-        self.swin_transformer = SwinTransformer(img_size,in_chans = 3)
+        self.swin_transformer = SwinTransformer(
+            img_size=img_size,
+            use_linformer=getattr(config, 'use_linformer', False),
+            linformer_k=getattr(config, 'linformer_k', 64))
         checkpoint = torch.load(model_path, map_location=torch.device(device))['model']
         unexpected = ["patch_embed.proj.weight", "patch_embed.proj.bias", "patch_embed.norm.weight", "patch_embed.norm.bias",
                      "head.weight", "head.bias", "layers.0.downsample.norm.weight", "layers.0.downsample.norm.bias",
@@ -178,7 +183,16 @@ class PyramidFeatures(nn.Module):
         for key in list(checkpoint.keys()):
             if key in unexpected :
                 del checkpoint[key]
-        self.swin_transformer.load_state_dict(checkpoint)
+        
+        # When using Linformer, use strict=False because attention structure differs
+        # LinformerWindowAttention has different parameters (E_k, E_v) than WindowAttention
+        if getattr(config, 'use_linformer', False):
+            self.swin_transformer.load_state_dict(checkpoint, strict=False)
+            print("Warning: Linformer enabled - loading pretrained weights with strict=False. "
+                  "Attention weights (qkv, proj) and Linformer projection matrices (E_k, E_v) "
+                  "will be randomly initialized.")
+        else:
+            self.swin_transformer.load_state_dict(checkpoint)
 
 
     def forward(self, x):
@@ -260,7 +274,10 @@ class All2Cross(nn.Module):
             dpr_ = dpr[dpr_ptr:dpr_ptr + curr_depth]
             blk = MultiScaleBlock(embed_dim, num_patches, block_config, num_heads=config.num_heads, mlp_ratio=config.mlp_ratio,
                                   qkv_bias=config.qkv_bias, qk_scale=config.qk_scale, drop=config.drop_rate, 
-                                  attn_drop=config.attn_drop_rate, drop_path=dpr_, norm_layer=norm_layer)
+                                  attn_drop=config.attn_drop_rate, drop_path=dpr_, norm_layer=norm_layer,
+                                  use_linformer=getattr(config, 'use_linformer', False),
+                                  linformer_k=getattr(config, 'linformer_k', 64),
+                                  max_seq_len=getattr(config, 'linformer_max_seq_len', 512))
             dpr_ptr += curr_depth
             self.blocks.append(blk)
 

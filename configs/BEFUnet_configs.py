@@ -38,6 +38,11 @@ def get_BEFUnet_configs():
     cfg.qkv_bias = True
     cfg.qk_scale = None
     cfg.cross_pos_embed = True
+    
+    # Linformer Configs (for efficient attention)
+    cfg.use_linformer = True  # Set to True to enable Linformer attention
+    cfg.linformer_k = 64  # Projection dimension for Linformer (k << N)
+    cfg.linformer_max_seq_len = 512  # Maximum sequence length for CrossAttention Linformer
 
     return cfg
 

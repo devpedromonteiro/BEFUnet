@@ -67,6 +67,133 @@ def window_reverse(windows, window_size, H, W):
     return x
 
 
+class LinformerWindowAttention(nn.Module):
+    r""" Linformer-based Window Attention module with relative position bias.
+    Uses linear attention by projecting keys and values to lower-dimensional space.
+    Args:
+        dim (int): Number of input channels.
+        window_size (tuple[int]): The height and width of the window.
+        num_heads (int): Number of attention heads.
+        linformer_k (int): Projection dimension for Linformer (k << N). Default: 64
+        qkv_bias (bool, optional):  If True, add a learnable bias to query, key, value. Default: True
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+    """
+
+    def __init__(self, dim, window_size, num_heads, linformer_k=64, qkv_bias=True, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.dim = dim
+        self.window_size = window_size  # Wh, Ww
+        self.num_heads = num_heads
+        self.linformer_k = linformer_k
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        
+        N = window_size[0] * window_size[1]  # sequence length
+        
+        # Linformer projection matrices: project from N to k
+        self.E_k = nn.Parameter(torch.randn(N, linformer_k))
+        self.E_v = nn.Parameter(torch.randn(N, linformer_k))
+        
+        # define a parameter table of relative position bias (simplified for Linformer)
+        self.relative_position_bias_table = nn.Parameter(
+            torch.zeros((2 * window_size[0] - 1) * (2 * window_size[1] - 1), num_heads))
+
+        # get pair-wise relative position index for each token inside the window
+        coords_h = torch.arange(self.window_size[0])
+        coords_w = torch.arange(self.window_size[1])
+        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing='ij'))  # 2, Wh, Ww
+        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
+        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
+        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
+        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
+        relative_coords[:, :, 1] += self.window_size[1] - 1
+        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
+        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
+        self.register_buffer("relative_position_index", relative_position_index)
+
+        self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        trunc_normal_(self.relative_position_bias_table, std=.02)
+        trunc_normal_(self.E_k, std=.02)
+        trunc_normal_(self.E_v, std=.02)
+        self.softmax = nn.Softmax(dim=-1)
+
+    def forward(self, x, mask=None):
+        """
+        Args:
+            x: input features with shape of (num_windows*B, N, C) >>> (B * 32*32, 4*4, 192)
+            mask: (0/-inf) mask with shape of (num_windows, Wh*Ww, Wh*Ww) or None
+        """
+        B_, N, C = x.shape
+        qkv = self.qkv(x).reshape(B_, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
+        q, k, v = qkv[0], qkv[1], qkv[2]  # B_, num_heads, N, head_dim
+
+        # Linformer: project k and v to lower dimension
+        # E_k: (N, linformer_k), E_v: (N, linformer_k)
+        k_proj = torch.einsum('bhnd,nk->bhkd', k, self.E_k)  # B_, num_heads, linformer_k, head_dim
+        v_proj = torch.einsum('bhnd,nk->bhkd', v, self.E_v)  # B_, num_heads, linformer_k, head_dim
+
+        # Compute attention: Q @ K^T (now Q is N x head_dim, K_proj is linformer_k x head_dim)
+        q = q * self.scale
+        attn = torch.einsum('bhnd,bhkd->bhnk', q, k_proj)  # B_, num_heads, N, linformer_k
+
+        # Add relative position bias (simplified - using average bias for linformer_k dimension)
+        relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1], self.window_size[0] * self.window_size[1], -1)
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        # Average bias across sequence dimension for Linformer compatibility
+        bias_avg = relative_position_bias.mean(dim=-1, keepdim=True)  # nH, Wh*Ww, 1
+        attn = attn + bias_avg.unsqueeze(0).expand(B_, -1, -1, -1)  # Broadcast to match attn shape
+
+        if mask is not None:
+            nW = mask.shape[0]
+            # For Linformer, mask needs to be adapted since attention is N×k instead of N×N
+            # mask shape: (nW, N, N) -> we need to adapt it for (nW, N, k)
+            # Strategy: average mask across keys dimension to get (nW, N), then expand
+            mask_avg = mask.mean(dim=-1)  # nW, N - average mask values for each query position
+            # Reshape attn to separate windows: (B_ // nW, nW, num_heads, N, linformer_k)
+            attn_reshaped = attn.view(B_ // nW, nW, self.num_heads, N, self.linformer_k)
+            # Expand mask_avg: (nW, N) -> (1, nW, 1, N, 1) to broadcast to all heads and k dimension
+            mask_expanded = mask_avg.unsqueeze(0).unsqueeze(2).unsqueeze(-1)  # 1, nW, 1, N, 1
+            attn_reshaped = attn_reshaped + mask_expanded
+            attn = attn_reshaped.view(-1, self.num_heads, N, self.linformer_k)
+            attn = self.softmax(attn)
+        else:
+            attn = self.softmax(attn)
+
+        attn = self.attn_drop(attn)
+
+        # Apply attention to projected values
+        x = torch.einsum('bhnk,bhkd->bhnd', attn, v_proj)  # B_, num_heads, N, head_dim
+        x = x.transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def extra_repr(self) -> str:
+        return f'dim={self.dim}, window_size={self.window_size}, num_heads={self.num_heads}, linformer_k={self.linformer_k}'
+
+    def flops(self, N):
+        # calculate flops for 1 window with token length of N
+        flops = 0
+        # qkv = self.qkv(x)
+        flops += N * self.dim * 3 * self.dim
+        # Linformer projections: k and v projections
+        flops += 2 * self.num_heads * N * (self.dim // self.num_heads) * self.linformer_k
+        # attn = (q @ k_proj^T) - reduced from O(N^2) to O(N*k)
+        flops += self.num_heads * N * (self.dim // self.num_heads) * self.linformer_k
+        # x = (attn @ v_proj) - reduced from O(N^2) to O(N*k)
+        flops += self.num_heads * N * self.linformer_k * (self.dim // self.num_heads)
+        # x = self.proj(x)
+        flops += N * self.dim * self.dim
+        return flops
+
+
 class WindowAttention(nn.Module): # W-MSA in the paper
     r""" Window based multi-head self attention (W-MSA) module with relative position bias.
     It supports both of shifted and non-shifted window.
@@ -184,7 +311,7 @@ class SwinTransformerBlock(nn.Module):
 
     def __init__(self, dim, input_resolution, num_heads, window_size=7, shift_size=0,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0., drop_path=0.,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_linformer=False, linformer_k=64):
         super().__init__()
         self.dim = dim
         self.input_resolution = input_resolution
@@ -199,9 +326,15 @@ class SwinTransformerBlock(nn.Module):
         assert 0 <= self.shift_size < self.window_size, "shift_size must in 0-window_size"
 
         self.norm1 = norm_layer(dim)
-        self.attn = WindowAttention(
-            dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
-            qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        if use_linformer:
+            self.attn = LinformerWindowAttention(
+                dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+                linformer_k=linformer_k, qkv_bias=qkv_bias, qk_scale=qk_scale, 
+                attn_drop=attn_drop, proj_drop=drop)
+        else:
+            self.attn = WindowAttention(
+                dim, window_size=to_2tuple(self.window_size), num_heads=num_heads,
+                qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.norm2 = norm_layer(dim)
@@ -360,7 +493,8 @@ class BasicLayer(nn.Module):
 
     def __init__(self, dim, input_resolution, depth, num_heads, window_size,
                  mlp_ratio=4., qkv_bias=True, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False):
+                 drop_path=0., norm_layer=nn.LayerNorm, downsample=None, use_checkpoint=False,
+                 use_linformer=False, linformer_k=64):
 
         super().__init__()
         self.dim = dim
@@ -377,7 +511,8 @@ class BasicLayer(nn.Module):
                                  qkv_bias=qkv_bias, qk_scale=qk_scale,
                                  drop=drop, attn_drop=attn_drop,
                                  drop_path=drop_path[i] if isinstance(drop_path, list) else drop_path,
-                                 norm_layer=norm_layer)
+                                 norm_layer=norm_layer,
+                                 use_linformer=use_linformer, linformer_k=linformer_k)
             for i in range(depth)])
 
         # patch merging layer
@@ -411,6 +546,79 @@ class BasicLayer(nn.Module):
 
 
 ############ DLF ############
+class LinformerCrossAttention(nn.Module):
+    """
+    Linformer-based Cross Attention module.
+    Uses linear attention by projecting keys and values to lower-dimensional space.
+    Args:
+        dim (int): Number of input channels.
+        num_heads (int): Number of attention heads.
+        linformer_k (int): Projection dimension for Linformer (k << N). Default: 64
+        max_seq_len (int): Maximum sequence length for projection matrices. Default: 512
+        qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: False
+        qk_scale (float | None, optional): Override default qk scale of head_dim ** -0.5 if set
+        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+    """
+    def __init__(self, dim, num_heads=8, linformer_k=64, max_seq_len=512, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
+        super().__init__()
+        self.num_heads = num_heads
+        self.linformer_k = linformer_k
+        self.max_seq_len = max_seq_len
+        head_dim = dim // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+
+        self.wq = nn.Linear(dim, dim, bias=qkv_bias)
+        self.wk = nn.Linear(dim, dim, bias=qkv_bias)
+        self.wv = nn.Linear(dim, dim, bias=qkv_bias)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
+        
+        # Linformer projection matrices: (max_seq_len, linformer_k)
+        # These project the sequence dimension from N to k
+        self.E_k = nn.Parameter(torch.randn(max_seq_len, linformer_k))
+        self.E_v = nn.Parameter(torch.randn(max_seq_len, linformer_k))
+        
+        # Initialize projection matrices
+        trunc_normal_(self.E_k, std=.02)
+        trunc_normal_(self.E_v, std=.02)
+
+    def forward(self, x):
+        B, N, C = x.shape
+        
+        # Handle variable sequence lengths
+        if N > self.max_seq_len:
+            # Truncate if sequence is longer than max
+            x = x[:, :self.max_seq_len, :]
+            N = self.max_seq_len
+        
+        q = self.wq(x[:, 0:1, ...]).reshape(B, 1, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # BH1(C/H)
+        k = self.wk(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # BHN(C/H)
+        v = self.wv(x).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)  # BHN(C/H)
+
+        # Linformer: project k and v to lower dimension using projection matrices
+        # k: (B, num_heads, N, head_dim), E_k: (max_seq_len, k) -> use first N rows
+        E_k_used = self.E_k[:N, :]  # (N, k)
+        E_v_used = self.E_v[:N, :]  # (N, k)
+        
+        # Project: k @ E_k^T -> (B, num_heads, N, head_dim) @ (N, k)^T -> (B, num_heads, head_dim, k)
+        k_proj = torch.einsum('bhnd,nk->bhkd', k, E_k_used)  # BHk(C/H)
+        v_proj = torch.einsum('bhnd,nk->bhkd', v, E_v_used)  # BHk(C/H)
+
+        # Compute attention: Q @ K_proj^T (reduced from O(N) to O(k))
+        attn = torch.einsum('bhnd,bhkd->bhnk', q, k_proj) * self.scale  # BH1k
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+
+        # Apply attention to projected values
+        x = torch.einsum('bhnk,bhkd->bhnd', attn, v_proj)  # BH1(C/H)
+        x = x.transpose(1, 2).reshape(B, 1, C)  # B1C
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+
 class CrossAttention(nn.Module):
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
@@ -445,11 +653,17 @@ class CrossAttention(nn.Module):
 class CrossAttentionBlock(nn.Module):
 
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, has_mlp=True):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, has_mlp=True,
+                 use_linformer=False, linformer_k=64, max_seq_len=512):
         super().__init__()
         self.norm1 = norm_layer(dim)
-        self.attn = CrossAttention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        if use_linformer:
+            self.attn = LinformerCrossAttention(
+                dim, num_heads=num_heads, linformer_k=linformer_k, max_seq_len=max_seq_len,
+                qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
+        else:
+            self.attn = CrossAttention(
+                dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale, attn_drop=attn_drop, proj_drop=drop)
 
         self.drop_path = DropPath(drop_path) if drop_path > 0. else nn.Identity()
         self.has_mlp = has_mlp
@@ -469,7 +683,7 @@ class CrossAttentionBlock(nn.Module):
 class MultiScaleBlock(nn.Module):
 
     def __init__(self, dim, patches, depth, num_heads, mlp_ratio, qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
-                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm):
+                 drop_path=0., act_layer=nn.GELU, norm_layer=nn.LayerNorm, use_linformer=False, linformer_k=64, max_seq_len=512):
         super().__init__()
 
         num_branches = len(dim)
@@ -503,13 +717,13 @@ class MultiScaleBlock(nn.Module):
             if depth[-1] == 0:  # backward capability:
                 self.fusion.append(CrossAttentionBlock(dim=dim[d_], num_heads=nh, mlp_ratio=mlp_ratio[d], qkv_bias=qkv_bias, qk_scale=qk_scale,
                                                        drop=drop, attn_drop=attn_drop, drop_path=drop_path[-1], norm_layer=norm_layer,
-                                                       has_mlp=False))
+                                                       has_mlp=False, use_linformer=use_linformer, linformer_k=linformer_k, max_seq_len=max_seq_len))
             else:
                 tmp = []
                 for _ in range(depth[-1]):
                     tmp.append(CrossAttentionBlock(dim=dim[d_], num_heads=nh, mlp_ratio=mlp_ratio[d], qkv_bias=qkv_bias, qk_scale=qk_scale,
                                                    drop=drop, attn_drop=attn_drop, drop_path=drop_path[-1], norm_layer=norm_layer,
-                                                   has_mlp=False))
+                                                   has_mlp=False, use_linformer=use_linformer, linformer_k=linformer_k, max_seq_len=max_seq_len))
                 self.fusion.append(nn.Sequential(*tmp))
 
         self.revert_projs = nn.ModuleList()
